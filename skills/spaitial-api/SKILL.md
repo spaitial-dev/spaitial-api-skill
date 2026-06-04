@@ -196,6 +196,7 @@ Charged for both prompt-to-image and world generation.
   "input": { "type": "url", "image_url": "https://..." },
   "model": "default",
   "title": "My world",
+  "output_format": "spz",
   "validation": { "skip": true, "error_on_fail": false },
   "visibility": { "is_public": false, "is_listed": false },
   "webhook": { "url": "https://example.com/hooks/spaitial" }
@@ -206,6 +207,7 @@ Charged for both prompt-to-image and world generation.
 | -------------------------- | --------------------------- | ------------------------------------------------------------------------------------ |
 | `model`                    | server default for the user | `GET /v1/models` to list                                                             |
 | `title`                    | unset                       | User-facing world caption (≤200 chars)                                               |
+| `output_format`            | `spz`                       | Final splat artifact: `spz` (default) or `sog` (PlayCanvas-optimized). `sog` adds roughly 25s to generation. The `splat` download and `splat_format` reflect this format. |
 | `validation.skip`          | `true`                      | Skip suitability check (saves cost + latency)                                        |
 | `validation.error_on_fail` | `false`                     | When `skip:false`, reject (422) on flagged input instead of proceeding with warnings |
 | `visibility.is_public`     | `false`                     | Anyone with `viewer_url` can view                                                    |
