@@ -2,7 +2,7 @@
 
 Official Agent Skill for integrating with the Spaitial v1 API.
 
-This skill gives coding agents a compact reference for creating 3D worlds through `api.spaitial.ai`, including authentication, world generation, file uploads, polling, downloads, mesh exports, webhooks, idempotency, errors, rate limits, and model discovery.
+This skill gives coding agents a compact reference for creating and editing 3D worlds through `api.spaitial.ai`, including authentication, world generation, panorama edits, iterative `pano_...` artifacts, file uploads, polling, downloads, mesh exports, webhooks, idempotency, errors, rate limits, and model discovery.
 
 ## Install
 
@@ -30,6 +30,10 @@ Use the spaitial-api skill to add webhook signature verification in Node.
 
 ```text
 Use the spaitial-api skill to upload an image, create a world, poll until complete, and download the .spz.
+```
+
+```text
+Use the spaitial-api skill to edit an existing world panorama, iterate with a reference image, then create a new world from the final pano_ id.
 ```
 
 ## Skill Layout

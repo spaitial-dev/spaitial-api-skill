@@ -1,6 +1,6 @@
 ---
 name: spaitial-api
-description: Generate 3D worlds programmatically via the Spaitial v1 HTTP API. Use when integrating with `api.spaitial.ai`, the SpAItial developer API, or when the user mentions API keys (`spt_live_…` / `spt_test_…`), `/v1/worlds`, splat (`.spz`) generation, panorama generation, world request IDs (`req_…`), file IDs (`file_…`), webhook delivery for world generation, or building an SDK / integration on top of Spaitial.
+description: Generate and edit 3D worlds programmatically via the Spaitial v1 HTTP API. Use when integrating with `api.spaitial.ai`, the SpAItial developer API, or when the user mentions API keys (`spt_live_…` / `spt_test_…`), `/v1/worlds`, `/v1/panoramas/edit`, splat (`.spz`) generation, panorama editing, world request IDs (`req_…`), panorama IDs (`pano_…`), file IDs (`file_…`), webhook delivery for world generation, or building an SDK / integration on top of Spaitial.
 license: MIT
 ---
 
@@ -37,6 +37,8 @@ Required scopes per endpoint:
 | `POST /v1/worlds/requests/:id/exports/:type`                       | `worlds:write`  |
 | `POST /v1/files`                                                   | `files:create`  |
 | `GET /v1/files`                                                    | `files:read`    |
+| `POST /v1/panoramas/edit`                                          | `worlds:create` |
+| `GET /v1/panoramas` (+ `/:id`, `/:id/download`)                    | `worlds:read`   |
 | `GET /v1/models`                                                   | `worlds:read`   |
 
 ## Endpoints at a glance
@@ -55,6 +57,10 @@ GET    /v1/worlds/requests/:request_id/exports/:type    Export status; READY inc
 GET    /v1/worlds/requests/:request_id/exports          List export statuses
 POST   /v1/files                                        Upload an input file, returns file_id
 GET    /v1/files                                        List uploaded files for this API key
+POST   /v1/panoramas/edit                               Edit a world/request/panorama and return a pano_... artifact
+GET    /v1/panoramas                                    List edited panoramas for this API key
+GET    /v1/panoramas/:panorama_id                       Get an edited panorama
+GET    /v1/panoramas/:panorama_id/download              302 → fresh signed edited-panorama URL
 GET    /v1/models                                       List available generation models
 GET    /v1/openapi.json                                 Machine-readable spec
 GET    /v1/docs                                         Swagger UI
@@ -188,6 +194,97 @@ The response includes `status` (`available`, `consumed`, or `expired`) plus `exp
 ```
 
 Charged for both prompt-to-image and world generation.
+
+### `panorama_id` — create from an edited panorama
+
+```json
+{
+  "input": {
+    "type": "panorama_id",
+    "panorama_id": "pano_abc123"
+  },
+  "title": "Edited world"
+}
+```
+
+`panorama_id` values come from `POST /v1/panoramas/edit`. World generation starts at the pano2video stage and keeps lineage to the source world. Edited panoramas live for 24 hours; creating a world marks them as consumed for visibility, but they can still be reused until expiry.
+
+## Panorama editing loop
+
+Use panorama editing when a user wants the app-style "edit the panorama, inspect it, iterate, then generate a new world" workflow.
+
+```bash
+# 1. Edit the panorama behind a completed API-created world/request.
+EDIT=$(curl -sX POST "https://api.spaitial.ai/v1/panoramas/edit" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{
+    "source": { "type": "world_id", "world_id": "<world-uuid>" },
+    "prompt": "change the rug and chair to yellow"
+  }')
+PANO_ID=$(echo "$EDIT" | jq -r .panorama_id)
+
+# 2. Inspect the edited panorama (302 -> signed URL; follow with -L).
+curl -L -o edited.png "https://api.spaitial.ai/v1/panoramas/$PANO_ID/download" \
+  -H "Authorization: Bearer $API_KEY"
+
+# 3. Iterate by feeding the pano_... back as the source.
+NEXT=$(curl -sX POST "https://api.spaitial.ai/v1/panoramas/edit" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"source\": { \"type\": \"panorama_id\", \"panorama_id\": \"$PANO_ID\" },
+    \"prompt\": \"add a sound system next to the window\"
+  }")
+FINAL_PANO_ID=$(echo "$NEXT" | jq -r .panorama_id)
+
+# 4. Create a world from the final panorama.
+curl -sX POST "https://api.spaitial.ai/v1/worlds" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"input\": { \"type\": \"panorama_id\", \"panorama_id\": \"$FINAL_PANO_ID\" },
+    \"title\": \"Edited world\"
+  }"
+```
+
+`POST /v1/panoramas/edit` request shape:
+
+```json
+{
+  "source": { "type": "request_id", "request_id": "req_..." },
+  "prompt": "make the room warmer",
+  "images": [
+    { "type": "url", "image_url": "https://example.com/reference.jpg" }
+  ]
+}
+```
+
+`source` can be:
+
+- `{ "type": "request_id", "request_id": "req_..." }` — an API-created completed world request owned by the same user.
+- `{ "type": "world_id", "world_id": "<world-uuid>" }` — an API-created completed world owned by the same user, even if created by a different API key.
+- `{ "type": "panorama_id", "panorama_id": "pano_..." }` — a previous edit artifact.
+
+Optional `images` accepts up to 3 references (`url`, `base64`, or `file_id`) for instructions like "add this sofa" or "merge this style". The edit prompt is passed through as the user's instruction. There is intentionally **no aspect-ratio field**; Spaitial preserves the panorama format so the result remains valid for world generation.
+
+Response:
+
+```json
+{
+  "panorama_id": "pano_...",
+  "status": "READY",
+  "panorama_url": "https://api.spaitial.ai/v1/panoramas/pano_.../download",
+  "prompt": "make the room warmer",
+  "source_request_id": "…",
+  "source_world_id": "…",
+  "parent_panorama_id": null,
+  "consumed": false,
+  "created_at": "2026-06-19T12:00:00Z",
+  "expires_at": "2026-06-20T12:00:00Z"
+}
+```
 
 ## Full request shape
 
@@ -469,6 +566,9 @@ Stable codes:
 | `FILE_NOT_FOUND`         | 404  | `file_id` unknown or not owned by caller                      |
 | `FILE_EXPIRED`           | 404  | `file_id` older than 24 hours or already consumed             |
 | `REQUEST_NOT_FOUND`      | 404  | Unknown `request_id` or not owned by caller                   |
+| `PANORAMA_NOT_FOUND`     | 404  | Unknown `panorama_id` or not owned by caller                  |
+| `PANORAMA_EXPIRED`       | 410  | Edited panorama is past its 24-hour TTL                       |
+| `EDIT_FAILED`            | 502  | Panorama edit could not be completed; retry                   |
 | `RESOURCE_NOT_READY`     | 409  | World not yet `COMPLETED` for artifact/export operations       |
 | `IDEMPOTENCY_KEY_REUSED` | 409  | Same key used with different body                             |
 | `RATE_LIMIT_EXCEEDED`    | 429  | Back off; check `Retry-After` + `X-RateLimit-*`               |
@@ -492,7 +592,7 @@ Defaults per key:
 | `v1-status`       | `GET /…/status`             | 300/min |
 | `v1-download`     | `GET /…/splat`, `/panorama` | 120/min |
 | `v1-files`        | `POST /v1/files`            | 20/min  |
-| `v1-default`      | everything else             | 120/min |
+| `v1-default`      | `POST /v1/panoramas/edit`, `GET /v1/panoramas…`, everything else | 120/min |
 
 `429 RATE_LIMIT_EXCEEDED` includes `Retry-After` (seconds).
 
@@ -519,7 +619,7 @@ Pass `model: "<id>"` on `POST /v1/worlds`. Omit to use the server-side default f
 
 ## Conventions worth knowing
 
-- IDs are opaque UUIDs with type prefixes: `req_`, `file_`, `wd_` (delivery). World IDs are returned as raw UUIDs (in `world.id`).
+- IDs are opaque UUIDs with type prefixes: `req_`, `file_`, `pano_`, `wd_` (delivery). World IDs are returned as raw UUIDs (in `world.id`).
 - Times are ISO-8601 UTC. `completed_at` is `null` until terminal.
 - `world` is the **artifact**; `request` is the **operation**. They have different IDs.
 - `validation` is advisory by default. Issues are surfaced as warnings on the world unless you opt into `error_on_fail: true`.
