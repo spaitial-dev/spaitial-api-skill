@@ -15,7 +15,7 @@ gh skill install spaitial-dev/spaitial-api-skill
 Pin a specific version:
 
 ```bash
-gh skill install spaitial-dev/spaitial-api-skill spaitial-api --pin v1.0.0
+gh skill install spaitial-dev/spaitial-api-skill spaitial-api --pin v1.3.2
 ```
 
 ## Example Prompts
