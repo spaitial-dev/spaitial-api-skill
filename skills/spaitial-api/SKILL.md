@@ -631,16 +631,18 @@ curl https://api.spaitial.ai/v1/models -H "Authorization: Bearer $API_KEY"
 }
 ```
 
-Pass `model: "<id>"` on `POST /v1/worlds`. Omit to use the server-side default for your account.
+Pass `model: "<id>"` on `POST /v1/worlds`. Omit to use the server-side default for your account. The `"default"` id returned by `GET /v1/models` is also accepted explicitly and resolves to your account's default model — passing `model: "default"` behaves the same as omitting the field. Any other unknown id returns `MODEL_NOT_FOUND` / `MODEL_FORBIDDEN`.
 
 ## Conventions worth knowing
 
 - IDs are opaque UUIDs with type prefixes: `req_`, `file_`, `pano_`, `wd_` (delivery). World IDs are returned as raw UUIDs (in `world.id`).
 - Times are ISO-8601 UTC. `completed_at` is `null` until terminal.
 - `world` is the **artifact**; `request` is the **operation**. They have different IDs.
+- `GET /v1/worlds/requests` is scoped to **worlds created through the API with this key**. Worlds generated in the Spaitial web app (dashboard) are **not** listed here, even for the same account — generate through the API (or the hosted MCP server) if you need to list or download the result programmatically.
 - `validation` is advisory by default. Issues are surfaced as warnings on the world unless you opt into `error_on_fail: true`.
 - Submitting the same body with a new `Idempotency-Key` makes a fresh job. Reuse the same key only for genuine network retries.
 - Splats and panoramas are served from a private bucket. Always go through `/v1/worlds/requests/:id/splat` or `/panorama`.
+- SPZ orientation: splat positions are in the RDF / OpenCV frame (x-right, **y-down**, z-forward), packed as `UNSPECIFIED` — the raw values are RDF, not the right-up-back (RUB, y-up) frame many other SPZ exporters use. RDF and RUB differ by a 180° rotation about X. Viewers that assume RUB (or read SPZ via `@playcanvas/splat-transform`) may render the scene upside-down; apply a 180°-about-X rotation (or flip the up-axis) if so.
 - Export `download_url` values are backend proxy URLs returned by `GET /v1/worlds/requests/:id/exports/:type`; calling one redirects to a short-lived signed file URL.
 
 ## Reference
