@@ -96,6 +96,7 @@ RES=$(curl -sX POST https://api.spaitial.ai/v1/worlds \
       "type": "url",
       "image_url": "https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?w=800"
     },
+    "model": "echo-2",
     "title": "Cozy reading nook"
   }')
 REQ_ID=$(echo "$RES" | jq -r .request_id)
@@ -122,12 +123,12 @@ Generation takes 5–10 minutes per world.
 
 ## Input types
 
-`POST /v1/worlds` accepts a discriminated `input.type`:
+`POST /v1/worlds` accepts a discriminated `input.type`. Every request also needs `model` (see [Models](#models)); it is shown on each example below.
 
 ### `url` — external HTTPS image
 
 ```json
-{ "input": { "type": "url", "image_url": "https://example.com/photo.jpg" } }
+{ "input": { "type": "url", "image_url": "https://example.com/photo.jpg" }, "model": "echo-2" }
 ```
 
 Server fetches under SSRF guards. HTTPS only, ≤25 MB, JPEG/PNG/WebP/GIF.
@@ -140,7 +141,8 @@ For a 360 panorama image, keep the same input shape and add `is_pano: true`:
     "type": "url",
     "image_url": "https://example.com/panorama.jpg",
     "is_pano": true
-  }
+  },
+  "model": "echo-2"
 }
 ```
 
@@ -153,7 +155,8 @@ The API trusts that the image is an equirectangular 360 panorama, starts generat
   "input": {
     "type": "base64",
     "image_base64": "data:image/png;base64,iVBORw0KGgo..."
-  }
+  },
+  "model": "echo-2"
 }
 ```
 
@@ -171,7 +174,7 @@ FILE=$(curl -sX POST https://api.spaitial.ai/v1/files \
 curl -sX POST https://api.spaitial.ai/v1/worlds \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"input\":{\"type\":\"file_id\",\"file_id\":\"$FILE\"}}"
+  -d "{\"input\":{\"type\":\"file_id\",\"file_id\":\"$FILE\"},\"model\":\"echo-2\"}"
 ```
 
 Uploads live in a private bucket with a 24-hour TTL. Owner-scoped — another caller's `file_id` returns 404. Using a `file_id` marks it as consumed; `GET /v1/files` returns `available`, `consumed`, and `expired` statuses.
@@ -186,7 +189,7 @@ PANO_FILE=$(curl -sX POST https://api.spaitial.ai/v1/files \
 curl -sX POST https://api.spaitial.ai/v1/worlds \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"input\":{\"type\":\"file_id\",\"file_id\":\"$PANO_FILE\",\"is_pano\":true}}"
+  -d "{\"input\":{\"type\":\"file_id\",\"file_id\":\"$PANO_FILE\",\"is_pano\":true},\"model\":\"echo-2\"}"
 ```
 
 List existing uploads for the current API key:
@@ -205,7 +208,8 @@ The response includes `status` (`available`, `consumed`, or `expired`) plus `exp
   "input": {
     "type": "text",
     "prompt": "a cozy sunlit reading nook with bookshelves"
-  }
+  },
+  "model": "echo-2"
 }
 ```
 
@@ -219,6 +223,7 @@ Charged for both prompt-to-image and world generation.
     "type": "panorama_id",
     "panorama_id": "pano_abc123"
   },
+  "model": "echo-2",
   "title": "Edited world"
 }
 ```
@@ -261,6 +266,7 @@ curl -sX POST "https://api.spaitial.ai/v1/worlds" \
   -H "Content-Type: application/json" \
   -d "{
     \"input\": { \"type\": \"panorama_id\", \"panorama_id\": \"$FINAL_PANO_ID\" },
+    \"model\": \"echo-2\",
     \"title\": \"Edited world\"
   }"
 ```
@@ -307,7 +313,7 @@ Response:
 ```json
 {
   "input": { "type": "url", "image_url": "https://..." },
-  "model": "default",
+  "model": "echo-2",
   "title": "My world",
   "output_format": "spz",
   "validation": { "skip": true, "error_on_fail": false },
@@ -318,7 +324,7 @@ Response:
 
 | Field                      | Default                     | Notes                                                                                |
 | -------------------------- | --------------------------- | ------------------------------------------------------------------------------------ |
-| `model`                    | server default for the user | `GET /v1/models` to list                                                             |
+| `model`                    | required (no default)       | Slug from `GET /v1/models` (e.g. `echo-2`)                                           |
 | `title`                    | unset                       | User-facing world caption (≤200 chars)                                               |
 | `output_format`            | `spz`                       | Final splat artifact: `spz` (default) or `sog` (PlayCanvas-optimized). `sog` adds roughly 25s to generation. The `splat` download and `splat_format` reflect this format. |
 | `validation.skip`          | `true`                      | Skip suitability check (saves cost + latency)                                        |
@@ -342,7 +348,7 @@ PENDING → PROCESSING → COMPLETED
 ```json
 {
   "request_id": "req_...",
-  "model": "default",
+  "model": "echo-2",
   "status": "COMPLETED",
   "created_at": "2026-05-14T12:00:00Z",
   "updated_at": "2026-05-14T12:09:48Z",
@@ -356,6 +362,11 @@ PENDING → PROCESSING → COMPLETED
     "panorama_url": "https://api.spaitial.ai/v1/worlds/requests/req_.../panorama",
     "viewer_url": "https://app.spaitial.ai/worlds/<world-uuid>",
     "visibility": { "is_public": false, "is_listed": false },
+    "camera": {
+      "hfov_deg": 103.93,
+      "roll_deg": 1.34,
+      "pitch_deg": -10.23
+    },
     "created_at": "2026-05-14T12:00:01Z",
     "updated_at": "2026-05-14T12:09:48Z",
     "completed_at": "2026-05-14T12:09:48Z"
@@ -368,6 +379,8 @@ PENDING → PROCESSING → COMPLETED
 ```
 
 `splat_url` and `panorama_url` are **stable API endpoints**, not signed URLs. Each `GET` to them returns a `302 Found` with a fresh 5-minute signed URL — safe to store the API URL in your DB forever. Auth on every download.
+
+`camera` is the estimated source-image pose from image-to-pano. `null` when that stage was skipped (pano upload, `panorama_id`, capture, multi-pano) or the estimate is missing. Same object is on `world.completed` webhook `data` and the PATCH response.
 
 ## Exports
 
@@ -621,17 +634,13 @@ curl https://api.spaitial.ai/v1/models -H "Authorization: Bearer $API_KEY"
 ```json
 {
   "models": [
-    { "id": "default", "description": "Standard pipeline", "is_default": true },
-    {
-      "id": "experimental",
-      "description": "Latest in-development",
-      "is_default": false
-    }
+    { "id": "echo-2", "name": "Echo 2", "credit_cost": 160, "docs_url": "https://docs.spaitial.ai/api/generation-models#default" },
+    { "id": "echo-hq", "name": "Echo 2 (HQ)", "credit_cost": 800, "docs_url": "https://docs.spaitial.ai/api/generation-models#echo-hq" }
   ]
 }
 ```
 
-Pass `model: "<id>"` on `POST /v1/worlds`. Omit to use the server-side default for your account. The `"default"` id returned by `GET /v1/models` is also accepted explicitly and resolves to your account's default model — passing `model: "default"` behaves the same as omitting the field. Any other unknown id returns `MODEL_NOT_FOUND` / `MODEL_FORBIDDEN`.
+Pass `model: "<id>"` on `POST /v1/worlds` (required; a missing or `"default"` model returns `400 INVALID_INPUT`). Ids are stable lowercase slugs; `name` is a display label that may change. Unknown ids return `MODEL_NOT_FOUND`; models not enabled for the key return `MODEL_FORBIDDEN`.
 
 ## Conventions worth knowing
 
