@@ -61,7 +61,7 @@ Required scopes per endpoint:
 
 ```
 POST   /v1/worlds                                       Create a world generation job
-GET    /v1/worlds/requests                              List jobs created by this API key
+GET    /v1/worlds/requests                              List API jobs on this account
 GET    /v1/worlds/requests/:request_id                  Full job result (post-completion)
 GET    /v1/worlds/requests/:request_id/status           Poll status (cheap, cached 3s)
 PATCH  /v1/worlds/requests/:request_id                  Update world visibility/title
@@ -119,7 +119,7 @@ curl -L -o world.spz "https://api.spaitial.ai/v1/worlds/requests/$REQ_ID/splat" 
   -H "Authorization: Bearer $API_KEY"
 ```
 
-Generation takes 5–10 minutes per world.
+Expected runtime depends on the model: read `estimated_duration_seconds` from `GET /v1/models` (and from the status response while the job runs). Single-image / panorama models default to about 9 minutes (522 s) unless the model publishes its own stage estimates; capture and multi-panorama reconstructions run for hours. Poll every 5–10 s rather than assuming a fixed duration.
 
 ## Input types
 
@@ -128,7 +128,10 @@ Generation takes 5–10 minutes per world.
 ### `url` — external HTTPS image
 
 ```json
-{ "input": { "type": "url", "image_url": "https://example.com/photo.jpg" }, "model": "echo-2" }
+{
+  "input": { "type": "url", "image_url": "https://example.com/photo.jpg" },
+  "model": "echo-2"
+}
 ```
 
 Server fetches under SSRF guards. HTTPS only, ≤25 MB, JPEG/PNG/WebP/GIF.
@@ -322,16 +325,16 @@ Response:
 }
 ```
 
-| Field                      | Default                     | Notes                                                                                |
-| -------------------------- | --------------------------- | ------------------------------------------------------------------------------------ |
-| `model`                    | required (no default)       | Slug from `GET /v1/models` (e.g. `echo-2`)                                           |
-| `title`                    | unset                       | User-facing world caption (≤200 chars)                                               |
-| `output_format`            | `spz`                       | Final splat artifact: `spz` (default) or `sog` (PlayCanvas-optimized). `sog` adds roughly 25s to generation. The `splat` download and `splat_format` reflect this format. |
-| `validation.skip`          | `true`                      | Skip suitability check (saves cost + latency)                                        |
-| `validation.error_on_fail` | `false`                     | When `skip:false`, reject (422) on flagged input instead of proceeding with warnings |
-| `visibility.is_public`     | `false`                     | Anyone with `viewer_url` can view                                                    |
-| `visibility.is_listed`     | `false`                     | Eligible for public gallery (requires `is_public:true`)                              |
-| `webhook.url`              | unset                       | HTTPS callback on terminal state                                                     |
+| Field                      | Default               | Notes                                                                                                                                                                     |
+| -------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                    | required (no default) | Slug from `GET /v1/models` (e.g. `echo-2`)                                                                                                                                |
+| `title`                    | unset                 | User-facing world caption (≤200 chars)                                                                                                                                    |
+| `output_format`            | `spz`                 | Final splat artifact: `spz` (default), `sog` (PlayCanvas-optimized, adds roughly 25s to generation), or `ply` (uncompressed PLY converted from the SPZ after generation). The `splat` download and `splat_format` reflect this format. |
+| `validation.skip`          | `true`                | Skip suitability check (saves cost + latency)                                                                                                                             |
+| `validation.error_on_fail` | `false`               | When `skip:false`, reject (422) on flagged input instead of proceeding with warnings                                                                                      |
+| `visibility.is_public`     | `false`               | Anyone with `viewer_url` can view                                                                                                                                         |
+| `visibility.is_listed`     | `false`               | Eligible for public gallery (requires `is_public:true`)                                                                                                                   |
+| `webhook.url`              | unset                 | HTTPS callback on terminal state                                                                                                                                          |
 
 ## Statuses
 
@@ -341,7 +344,7 @@ PENDING → PROCESSING → COMPLETED
                     ↘ CANCELLED
 ```
 
-`progress` (0-1) is coarse; reflects the current pipeline stage.
+`progress` (0-1) is coarse: it tracks the pipeline stage, or elapsed time against the ETA for long capture/multi-pano runs (never above 0.79 until done). `estimated_duration_seconds` is the expected total runtime and is `null` once terminal. For `FAILED`, `error: { code, message }` carries the reason (same as the `world.failed` webhook); otherwise `error` is `null`.
 
 ## Result envelope (`GET /v1/worlds/requests/:id`)
 
@@ -372,11 +375,12 @@ PENDING → PROCESSING → COMPLETED
     "completed_at": "2026-05-14T12:09:48Z"
   },
   "validation": { "passed": true, "issues": [] },
-  "input": {
-    /* echoed request */
-  }
+  "input": { "type": "url", "image_url": "https://example.com/room.jpg" },
+  "error": null
 }
 ```
+
+`input` is the request's `input` object. Query strings and fragments are stripped from every `url` / `*_url` field, so presigned links you sent are never stored or returned.
 
 `splat_url` and `panorama_url` are **stable API endpoints**, not signed URLs. Each `GET` to them returns a `302 Found` with a fresh 5-minute signed URL — safe to store the API URL in your DB forever. Auth on every download.
 
@@ -388,10 +392,12 @@ Exports are optional artifacts derived from a completed world. They are keyed by
 
 Supported export types today:
 
-| Type              | Description                                 |
-| ----------------- | ------------------------------------------- |
-| `mesh`            | Full-resolution reconstructed mesh (`.ply`) |
-| `mesh-simplified` | Simplified mesh optimized for real-time use |
+| Type              | Description                                                                                                      |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `mesh`            | Full-resolution reconstructed mesh (`.ply`)                                                                      |
+| `mesh-simplified` | Simplified mesh optimized for real-time use                                                                      |
+| `floorplan`       | Top-down PNG render of the world (`floorplan.png`). A visual overview, not a measured plan                       |
+| `zip`             | Bundle of world assets; optional body `{ "include": ["spz", "sog", "ply", "mesh", "floorplan"] }` (default: all) |
 
 Start or retrieve an export:
 
@@ -429,6 +435,22 @@ Ready:
 ```
 
 `download_url` is a stable API proxy endpoint. Calling it redirects to a short-lived signed file URL, so store the API URL and fetch a fresh redirect when needed. Requesting either mesh type starts the shared mesh pipeline; both `mesh` and `mesh-simplified` become ready when processing completes.
+
+`floorplan` is generated automatically after completion for worlds that produce a voxel grid (Echo 3 / capture worlds), so check its status before starting it — it is often already `PROCESSING` or `READY`. For other worlds, `POST …/exports/floorplan` starts the render.
+
+A `zip` export is addressed by its asset set. Build a subset with a POST body, then poll the same set with `?include=` (comma-separated); omit `include` on both for the default all-assets zip:
+
+```bash
+curl -sX POST "https://api.spaitial.ai/v1/worlds/requests/$REQ_ID/exports/zip" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "include": ["spz", "floorplan"] }'
+
+curl -s "https://api.spaitial.ai/v1/worlds/requests/$REQ_ID/exports/zip?include=spz,floorplan" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+Zip responses echo the effective `include` (deduped, sorted), and a READY zip's `download_url` carries it. Unknown asset names return `400 INVALID_INPUT`.
 
 ## Idempotency
 
@@ -530,11 +552,11 @@ function verify(rawBody, signature, secret) {
 ```bash
 curl -X POST "https://api.spaitial.ai/v1/worlds/requests/$REQ_ID/cancel" \
   -H "Authorization: Bearer $API_KEY"
-# → { "success": true }   when intent was recorded
-# → { "success": false }  when the job was already terminal
+# → 200 { "success": true }  intent recorded (or the request was already CANCELLED)
+# → 409 REQUEST_NOT_CANCELLABLE  the request already COMPLETED or FAILED
 ```
 
-Cancel is best-effort. The API reports `CANCELLED` immediately; in-flight processing stops within seconds.
+Cancel is best-effort and safe to retry. The API reports `CANCELLED` immediately; in-flight processing stops within seconds. The `world.cancelled` webhook's `completed_at` is the cancel time, matching the status endpoint.
 
 ## Updating a World
 
@@ -581,27 +603,30 @@ Every non-2xx response:
 
 Stable codes:
 
-| Code                     | HTTP | Meaning                                                       |
-| ------------------------ | ---- | ------------------------------------------------------------- |
-| `UNAUTHORIZED`           | 401  | Missing / invalid API key                                     |
-| `FORBIDDEN`              | 403  | API key lacks required scope                                  |
-| `MODEL_NOT_FOUND`        | 400  | Unknown `model`                                               |
-| `MODEL_FORBIDDEN`        | 403  | Restricted model                                              |
-| `MODEL_UNAVAILABLE`      | 503  | Model deployment unhealthy                                    |
-| `INVALID_INPUT`          | 400  | Malformed body / unsupported input                            |
-| `INSUFFICIENT_CREDITS`   | 402  | Top up at the developers site                                 |
-| `MODERATION_REJECTED`    | 403  | Content moderation blocked the input                          |
-| `VALIDATION_FAILED`      | 422  | Suitability check rejected (with `details.validation.issues`) |
-| `FILE_NOT_FOUND`         | 404  | `file_id` unknown or not owned by caller                      |
-| `FILE_EXPIRED`           | 404  | `file_id` older than 24 hours or already consumed             |
-| `REQUEST_NOT_FOUND`      | 404  | Unknown `request_id` or not owned by caller                   |
-| `PANORAMA_NOT_FOUND`     | 404  | Unknown `panorama_id` or not owned by caller                  |
-| `PANORAMA_EXPIRED`       | 410  | Edited panorama is past its 24-hour TTL                       |
-| `EDIT_FAILED`            | 502  | Panorama edit could not be completed; retry                   |
-| `RESOURCE_NOT_READY`     | 409  | World not yet `COMPLETED` for artifact/export operations       |
-| `IDEMPOTENCY_KEY_REUSED` | 409  | Same key used with different body                             |
-| `RATE_LIMIT_EXCEEDED`    | 429  | Back off; check `Retry-After` + `X-RateLimit-*`               |
-| `INTERNAL_ERROR`         | 500  | Retry with backoff                                            |
+| Code                                               | HTTP | Meaning                                                                                        |
+| -------------------------------------------------- | ---- | ---------------------------------------------------------------------------------------------- |
+| `UNAUTHORIZED`                                     | 401  | Missing / invalid API key                                                                      |
+| `FORBIDDEN`                                        | 403  | API key lacks required scope                                                                   |
+| `MODEL_NOT_FOUND`                                  | 400  | Unknown `model`                                                                                |
+| `MODEL_FORBIDDEN`                                  | 403  | Restricted model                                                                               |
+| `MODEL_UNAVAILABLE`                                | 503  | Model deployment unhealthy                                                                     |
+| `INVALID_INPUT`                                    | 400  | Malformed body / unsupported input; `details.issues[]` lists `{ path, message }` per bad field |
+| `INSUFFICIENT_CREDITS`                             | 402  | Top up; `details` has `required_credits` + `available_credits`                                 |
+| `MODERATION_REJECTED`                              | 403  | Content moderation blocked the input                                                           |
+| `VALIDATION_FAILED`                                | 422  | Suitability check rejected (with `details.validation.issues`)                                  |
+| `FILE_NOT_FOUND`                                   | 404  | `file_id` unknown or not owned by caller                                                       |
+| `FILE_EXPIRED`                                     | 404  | `file_id` older than 24 hours or already consumed                                              |
+| `REQUEST_NOT_FOUND`                                | 404  | Unknown `request_id` or not owned by caller                                                    |
+| `PANORAMA_NOT_FOUND`                               | 404  | Unknown `panorama_id` or not owned by caller                                                   |
+| `PANORAMA_EXPIRED`                                 | 410  | Edited panorama is past its 24-hour TTL                                                        |
+| `EDIT_FAILED`                                      | 503  | Panorama edit could not be completed; retry                                                    |
+| `RESOURCE_NOT_READY`                               | 409  | World not yet `COMPLETED` for artifact/export operations                                       |
+| `IDEMPOTENCY_KEY_REUSED`                           | 409  | Same key used with different body                                                              |
+| `REQUEST_NOT_CANCELLABLE`                          | 409  | Cancel on a COMPLETED / FAILED request                                                         |
+| `RATE_LIMIT_EXCEEDED`                              | 429  | Back off; check `Retry-After` + `X-RateLimit-*`                                                |
+| `WORLD_USER_LIMIT`                                 | 429  | Too many active generations on the account; retry when one finishes                            |
+| `WORLD_INTAKE_PAUSED` / `WORLD_INTAKE_UNAVAILABLE` | 503  | Generation intake temporarily closed; retry later                                              |
+| `INTERNAL_ERROR`                                   | 500  | Retry with backoff                                                                             |
 
 ## Rate limits
 
@@ -615,15 +640,15 @@ X-RateLimit-Reset:     1778836080
 
 Defaults per key:
 
-| Bucket            | Routes                      | Limit   |
-| ----------------- | --------------------------- | ------- |
-| `v1-world-create` | `POST /v1/worlds`           | 10/min  |
-| `v1-status`       | `GET /…/status`             | 300/min |
-| `v1-download`     | `GET /…/splat`, `/panorama` | 120/min |
-| `v1-files`        | `POST /v1/files`            | 20/min  |
+| Bucket            | Routes                                                           | Limit   |
+| ----------------- | ---------------------------------------------------------------- | ------- |
+| `v1-world-create` | `POST /v1/worlds`                                                | 10/min  |
+| `v1-status`       | `GET /…/status`                                                  | 300/min |
+| `v1-download`     | `GET /…/splat`, `/panorama`                                      | 120/min |
+| `v1-files`        | `POST /v1/files`                                                 | 20/min  |
 | `v1-default`      | `POST /v1/panoramas/edit`, `GET /v1/panoramas…`, everything else | 120/min |
 
-`429 RATE_LIMIT_EXCEEDED` includes `Retry-After` (seconds).
+`429 RATE_LIMIT_EXCEEDED` includes `Retry-After` (seconds). On world-create routes the `X-RateLimit-*` headers describe the create bucket, and requests rejected with a 4xx (validation, credits, access) don't count against it.
 
 ## Models
 
@@ -634,11 +659,39 @@ curl https://api.spaitial.ai/v1/models -H "Authorization: Bearer $API_KEY"
 ```json
 {
   "models": [
-    { "id": "echo-2", "name": "Echo 2", "credit_cost": 160, "docs_url": "https://docs.spaitial.ai/api/generation-models#default" },
-    { "id": "echo-hq", "name": "Echo 2 (HQ)", "credit_cost": 800, "docs_url": "https://docs.spaitial.ai/api/generation-models#echo-hq" }
+    {
+      "id": "echo-2",
+      "name": "Echo 2",
+      "credit_cost": 160,
+      "pricing": { "unit": "world", "credits": 160 }
+    },
+    {
+      "id": "echo-3",
+      "name": "Echo 3",
+      "credit_cost": 900,
+      "pricing": {
+        "unit": "capture_minute",
+        "credits_per_minute": 300,
+        "minimum_credits": 900,
+        "minimum_duration_seconds": 180
+      }
+    }
   ]
 }
 ```
+
+(Other fields omitted.) Every model also carries:
+
+| Field                        | Notes                                                                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `description`                | Display text, may be `null`                                                                                                                       |
+| `estimated_duration_seconds` | Expected wall-clock generation time. For capture models it is the ETA of a minimum-length scan and grows with scan length                         |
+| `docs_url`                   | Usage docs for the model                                                                                                                          |
+| `input_kind`                 | Pipeline it consumes: `single`, `posed_multipano`, `unposed_multipano`, or `perspective_capture`. Filter with `GET /v1/models?input_kind=<kind>` |
+| `is_default`                 | Always `false` for API keys; there is no default model on the API, so always pass an explicit `id`                                                |
+| `is_internal`                | `true` for staff-only models; those are hidden from non-staff accounts, so external callers only see `false`                                      |
+
+`pricing` is the authoritative price. For capture models `credit_cost` is the minimum charge; get the exact figure for a recorded scan from `GET /v1/captures/process-quote` (`required_credits`, `available_credits`, `has_enough`). Worlds created from a panorama (`panorama_id`, or a panorama image) skip image-to-pano and cost `credit_cost − 45` (115 for Echo 2).
 
 Pass `model: "<id>"` on `POST /v1/worlds` (required; a missing or `"default"` model returns `400 INVALID_INPUT`). Ids are stable lowercase slugs; `name` is a display label that may change. Unknown ids return `MODEL_NOT_FOUND`; models not enabled for the key return `MODEL_FORBIDDEN`.
 
@@ -647,7 +700,7 @@ Pass `model: "<id>"` on `POST /v1/worlds` (required; a missing or `"default"` mo
 - IDs are opaque UUIDs with type prefixes: `req_`, `file_`, `pano_`, `wd_` (delivery). World IDs are returned as raw UUIDs (in `world.id`).
 - Times are ISO-8601 UTC. `completed_at` is `null` until terminal.
 - `world` is the **artifact**; `request` is the **operation**. They have different IDs.
-- `GET /v1/worlds/requests` is scoped to **worlds created through the API with this key**. Worlds generated in the Spaitial web app (dashboard) are **not** listed here, even for the same account — generate through the API (or the hosted MCP server) if you need to list or download the result programmatically.
+- `GET /v1/worlds/requests` and the per-request reads are scoped to **worlds created through the API by any key on your account**, so a read-only key can monitor jobs a write key started. Worlds generated in the Spaitial web app (dashboard) are **not** listed here, even for the same account — generate through the API (or the hosted MCP server) if you need to list or download the result programmatically.
 - `validation` is advisory by default. Issues are surfaced as warnings on the world unless you opt into `error_on_fail: true`.
 - Submitting the same body with a new `Idempotency-Key` makes a fresh job. Reuse the same key only for genuine network retries.
 - Splats and panoramas are served from a private bucket. Always go through `/v1/worlds/requests/:id/splat` or `/panorama`.
