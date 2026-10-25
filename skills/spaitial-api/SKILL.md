@@ -38,7 +38,34 @@ Every request needs a Bearer token issued by the developers site (`https://devel
 Authorization: Bearer spt_live_<32-char-base32>
 ```
 
-Test keys use the `spt_test_` prefix (same scopes, lower rate limits, no GPU billing).
+The developer portal issues `spt_live_` keys; there is no separate test-key mode with different limits or billing.
+
+## Billing & Credits
+
+Developer API access is public for all users and shares the same account credits as the app:
+
+- 1 credit = $0.01
+- Free users receive 800 credits a month, enough for about 5 Echo-2 generations or 1 Echo HQ generation
+- Custom/Enterprise supports larger volume
+- Purchased credits use 1,600, 3,200, or 8,000-credit packs shared across app and API
+- Monthly credits do not roll over; purchased credits roll over and do not expire
+
+Model prices (live values come from `GET /v1/models`, see [Models](#models)):
+
+| Model           | Best for                                | Typical time | Credits |
+| --------------- | --------------------------------------- | -----------: | ------: |
+| Echo-2 Standard | Fast, general-purpose world generation  |   ~9 minutes |     160 |
+| Echo HQ         | Higher-detail, higher-resolution worlds |  ~60 minutes |     800 |
+
+Plan capacity:
+
+| Plan     | Included credits | Echo-2 generations | Echo HQ generations |
+| -------- | ---------------: | -----------------: | ------------------: |
+| Free     |        800/month |           ~5/month |            ~1/month |
+| Standard |      7,500/month |          ~46/month |            ~9/month |
+| Pro      |     15,000/month |          ~93/month |           ~18/month |
+
+Reads, status polling, downloads, and exports do not consume generation credits.
 
 Required scopes per endpoint:
 
@@ -450,7 +477,9 @@ curl -s "https://api.spaitial.ai/v1/worlds/requests/$REQ_ID/exports/zip?include=
   -H "Authorization: Bearer $API_KEY"
 ```
 
-Zip responses echo the effective `include` (deduped, sorted), and a READY zip's `download_url` carries it. Unknown asset names return `400 INVALID_INPUT`.
+A zip is addressed by its effective include set (deduplicated and sorted), so repeating a request for the same set returns `200 READY` with the cached archive, while a new set starts a new build (`202`). Missing assets (e.g. an unrequested mesh) are generated first, so a fresh full zip can take several minutes. Responses echo the effective `include`, and a READY zip's `download_url` carries it. Unknown asset names return `400 INVALID_INPUT`.
+
+The archive uses fixed entry names — `splat.spz`, `splat.sog`, `splat.ply`, `mesh.ply`, `floorplan.png` — plus a `manifest.json`. When the original request set a webhook URL, completion also delivers a `world.export.completed` event with `export.type: "zip"`, the `include` set, and the `download_url`.
 
 ## Idempotency
 
