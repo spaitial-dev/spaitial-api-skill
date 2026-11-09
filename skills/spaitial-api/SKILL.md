@@ -699,11 +699,12 @@ curl https://api.spaitial.ai/v1/models -H "Authorization: Bearer $API_KEY"
       "name": "Echo 3",
       "credit_cost": 900,
       "pricing": {
-        "unit": "capture_minute",
-        "credits_per_minute": 300,
-        "minimum_credits": 900,
-        "minimum_duration_seconds": 180
-      }
+        "unit": "capture_frame",
+        "base_credits": 900,
+        "credits_per_frame": 1,
+        "max_frames": 5000
+      },
+      "docs_url": "https://docs.spaitial.ai/api/capture-worlds"
     }
   ]
 }
@@ -720,7 +721,7 @@ curl https://api.spaitial.ai/v1/models -H "Authorization: Bearer $API_KEY"
 | `is_default`                 | Always `false` for API keys; there is no default model on the API, so always pass an explicit `id`                                                |
 | `is_internal`                | `true` for staff-only models; those are hidden from non-staff accounts, so external callers only see `false`                                      |
 
-`pricing` is the authoritative price. For capture models `credit_cost` is the minimum charge; get the exact figure for a recorded scan from `GET /v1/captures/process-quote` (`required_credits`, `available_credits`, `has_enough`). Worlds created from a panorama (`panorama_id`, or a panorama image) skip image-to-pano and cost `credit_cost − 45` (115 for Echo 2).
+`pricing` is the authoritative price. Echo 3 (`echo-3`, capture input) is enabled for every API key and costs `900 + frame_count` credits; its `credit_cost` is the 900-credit base. Get the exact figure for a capture from `GET /v1/captures/process-quote?frame_count=<n>&model=echo-3` (`required_credits`, `available_credits`, `has_enough`). The capture ZIP and upload flows are in the [capture guide](https://docs.spaitial.ai/api/capture-worlds). Worlds created from a panorama (`panorama_id`, or a panorama image) skip image-to-pano and cost `credit_cost − 45` (115 for Echo 2).
 
 Pass `model: "<id>"` on `POST /v1/worlds` (required; a missing or `"default"` model returns `400 INVALID_INPUT`). Ids are stable lowercase slugs; `name` is a display label that may change. Unknown ids return `MODEL_NOT_FOUND`; models not enabled for the key return `MODEL_FORBIDDEN`.
 
