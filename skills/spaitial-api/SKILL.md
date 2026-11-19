@@ -1,6 +1,6 @@
 ---
 name: spaitial-api
-description: Generate and edit explorable 3D worlds, game scenes, Gaussian splats, SPZ/SOG assets, and spatial world-model outputs via the Spaitial v1 HTTP API. Use when integrating with `api.spaitial.ai`, the SpAItial developer API, or when the user mentions world models, spatial AI, 3D worlds, game scenes, agent environments, Gaussian splatting, API keys (`spt_live_…` / `spt_test_…`), `/v1/worlds`, `/v1/panoramas/edit`, splat (`.spz`) generation, panorama editing, world request IDs (`req_…`), panorama IDs (`pano_…`), file IDs (`file_…`), webhook delivery for world generation, or building an SDK / integration on top of Spaitial.
+description: Generate and edit explorable 3D worlds, game scenes, Gaussian splats, SPZ/SOG assets, and spatial world-model outputs via the Spaitial v1 HTTP API. Use when integrating with `api.spaitial.ai`, the SpAItial developer API, or when the user mentions world models, spatial AI, 3D worlds, game scenes, agent environments, Gaussian splatting, API keys (`spt_live_…` / `spt_test_…`), `/v1/worlds`, `/v1/panoramas/edit`, splat (`.spz`) generation, panorama editing, Echo 3 phone captures, floorplans and mapping them to world coordinates, reconstructed camera poses, mesh and zip exports, world request IDs (`req_…`), panorama IDs (`pano_…`), file IDs (`file_…`), webhook delivery for world generation, or building an SDK / integration on top of Spaitial.
 license: MIT
 ---
 
@@ -73,7 +73,7 @@ Required scopes per endpoint:
 | ------------------------------------------------------------------ | --------------- |
 | `POST /v1/worlds`                                                  | `worlds:create` |
 | `GET /v1/worlds/requests`                                          | `worlds:read`   |
-| `GET /v1/worlds/requests/:id` (+ `/status`, `/splat`, `/panorama`) | `worlds:read`   |
+| `GET /v1/worlds/requests/:id` (+ `/status`, `/splat`, `/panorama`, `/cameras`, `/mesh`) | `worlds:read`   |
 | `GET /v1/worlds/requests/:id/exports` (+ `/:type`)                 | `worlds:read`   |
 | `PATCH /v1/worlds/requests/:id`                                    | `worlds:write`  |
 | `POST /v1/worlds/requests/:id/cancel`                              | `worlds:write`  |
@@ -83,6 +83,7 @@ Required scopes per endpoint:
 | `POST /v1/panoramas/edit`                                          | `worlds:create` |
 | `GET /v1/panoramas` (+ `/:id`, `/:id/download`)                    | `worlds:read`   |
 | `GET /v1/models`                                                   | `worlds:read`   |
+| `GET /v1/captures/process-quote`, `GET /v1/captures/limits`        | `worlds:create` |
 
 ## Endpoints at a glance
 
@@ -95,6 +96,8 @@ PATCH  /v1/worlds/requests/:request_id                  Update world visibility/
 POST   /v1/worlds/requests/:request_id/cancel           Best-effort cancel
 GET    /v1/worlds/requests/:request_id/splat            302 → fresh signed splat URL
 GET    /v1/worlds/requests/:request_id/panorama         302 → fresh signed panorama URL
+GET    /v1/worlds/requests/:request_id/cameras          302 → reconstructed capture cameras (cameras.json)
+GET    /v1/worlds/requests/:request_id/mesh             302 → GLB of a textured mesh world
 POST   /v1/worlds/requests/:request_id/exports/:type    Start an export, e.g. mesh
 GET    /v1/worlds/requests/:request_id/exports/:type    Export status; READY includes download_url
 GET    /v1/worlds/requests/:request_id/exports          List export statuses
@@ -105,6 +108,8 @@ GET    /v1/panoramas                                    List edited panoramas fo
 GET    /v1/panoramas/:panorama_id                       Get an edited panorama
 GET    /v1/panoramas/:panorama_id/download              302 → fresh signed edited-panorama URL
 GET    /v1/models                                       List available generation models
+GET    /v1/captures/process-quote                       Price and ETA of an Echo 3 capture for a frame count
+GET    /v1/captures/limits                              Your account's frame limit per capture
 GET    /v1/openapi.json                                 Machine-readable spec
 GET    /v1/docs                                         Swagger UI
 ```
@@ -386,11 +391,14 @@ PENDING → PROCESSING → COMPLETED
   "world": {
     "id": "<world-uuid>",
     "title": "Cozy reading nook",
+    "output_type": "splat",
     "splat_url": "https://api.spaitial.ai/v1/worlds/requests/req_.../splat",
     "splat_format": "spz",
+    "mesh": null,
     "thumbnail_url": "https://img.spaitial.ai/.../thumbnail.webp",
     "panorama_url": "https://api.spaitial.ai/v1/worlds/requests/req_.../panorama",
     "viewer_url": "https://app.spaitial.ai/worlds/<world-uuid>",
+    "cameras_url": null,
     "visibility": { "is_public": false, "is_listed": false },
     "camera": {
       "hfov_deg": 103.93,
@@ -413,6 +421,10 @@ PENDING → PROCESSING → COMPLETED
 
 `camera` is the estimated source-image pose from image-to-pano. `null` when that stage was skipped (pano upload, `panorama_id`, capture, multi-pano) or the estimate is missing. Same object is on `world.completed` webhook `data` and the PATCH response.
 
+`cameras_url` is set on Echo 3 capture worlds and points at `/cameras`, the reconstructed camera of every frame (see [Capture worlds](#capture-worlds-echo-3)). It is `null` for other worlds.
+
+`output_type` is `splat` for every public model. Worlds from a private textured mesh model have `output_type: "textured_mesh"`, `splat_url: null`, and a `mesh` block (`{ "format": "glb", "url", "uncompressed_url" }`, both `/mesh?variant=meshopt|uncompressed`). Their only export is a zip of `glb` and `glb-uncompressed`; the splat-based exports answer `409 UNSUPPORTED_FOR_OUTPUT_TYPE`.
+
 ## Exports
 
 Exports are optional artifacts derived from a completed world. They are keyed by `type` so the API can grow beyond mesh without changing the route shape.
@@ -423,8 +435,8 @@ Supported export types today:
 | ----------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `mesh`            | Full-resolution reconstructed mesh (`.ply`)                                                                      |
 | `mesh-simplified` | Simplified mesh optimized for real-time use                                                                      |
-| `floorplan`       | Top-down PNG render of the world (`floorplan.png`). A visual overview, not a measured plan                       |
-| `zip`             | Bundle of world assets; optional body `{ "include": ["spz", "sog", "ply", "mesh", "floorplan"] }` (default: all) |
+| `floorplan`       | Top-down PNG render of the world (`floorplan.png`), with a pixel-to-world [mapping](#floorplan-coordinates). Not a measured plan |
+| `zip`             | Bundle of world assets; optional body `{ "include": ["spz", "sog", "ply", "mesh", "floorplan"] }` (default: every asset the world has, plus `cameras` on capture worlds) |
 
 Start or retrieve an export:
 
@@ -463,7 +475,63 @@ Ready:
 
 `download_url` is a stable API proxy endpoint. Calling it redirects to a short-lived signed file URL, so store the API URL and fetch a fresh redirect when needed. Requesting either mesh type starts the shared mesh pipeline; both `mesh` and `mesh-simplified` become ready when processing completes.
 
-`floorplan` is generated automatically after completion for worlds that produce a voxel grid (Echo 3 / capture worlds), so check its status before starting it — it is often already `PROCESSING` or `READY`. For other worlds, `POST …/exports/floorplan` starts the render.
+`floorplan` is generated automatically after completion for Echo 3 capture worlds, so check its status before starting it — it is often already `PROCESSING` or `READY`. For other worlds, `POST …/exports/floorplan` starts the render. Some older floorplans were saved without a coordinate frame; they report `NOT_REQUESTED`, and requesting the export renders a new one.
+
+### Floorplan coordinates
+
+A `READY` floorplan export carries a `floorplan` object that maps image pixels to world X/Z. A READY zip that includes `floorplan`, and its `world.export.completed` webhook, carry the same object, and the zip bundles it as `floorplan.json`:
+
+```json
+{
+  "type": "floorplan",
+  "status": "READY",
+  "download_url": "https://api.spaitial.ai/v1/worlds/requests/req_.../exports/floorplan?download=1",
+  "floorplan": {
+    "version": 1,
+    "coordinate_system": "spaitial-world-v1",
+    "projection": "orthographic-top-down",
+    "origin_xz": [0.4, -1.1],
+    "image_x_axis_xz": [1, 0],
+    "image_y_axis_xz": [0, 1],
+    "extent_m": [12.096, 12.096],
+    "cut_height_y": 1.244,
+    "scene_bounds": { "min": [-5.2, -0.1, -6.4], "max": [6.0, 3.1, 4.2] },
+    "image": {
+      "width_px": 1024,
+      "height_px": 1024,
+      "meters_per_pixel": [0.0118125, 0.0118125],
+      "world_xz_from_pixel": [[0.0118125, 0, -5.648], [0, 0.0118125, -7.148], [0, 0, 1]],
+      "pixel_from_world_xz": [[84.6561, 0, 478.1376], [0, 84.6561, 605.1217], [0, 0, 1]],
+      "download_url": "https://api.spaitial.ai/v1/worlds/requests/req_.../exports/floorplan?download=1"
+    },
+    "raw_image": {
+      "width_px": 1024,
+      "height_px": 1024,
+      "meters_per_pixel": [0.0118125, 0.0118125],
+      "world_xz_from_pixel": [[0.0118125, 0, -5.648], [0, 0.0118125, -7.148], [0, 0, 1]],
+      "pixel_from_world_xz": [[84.6561, 0, 478.1376], [0, 84.6561, 605.1217], [0, 0, 1]],
+      "download_url": "https://api.spaitial.ai/v1/worlds/requests/req_.../exports/floorplan?download=1&variant=raw"
+    },
+    "generated_at": "2026-11-18T09:12:00.000Z"
+  }
+}
+```
+
+- World coordinates are meters, +Y up: the raw `splat.spz` positions with Y and Z negated, `world = (x, -y, -z)`. That is the 180°-about-X turn in [Conventions](#conventions-worth-knowing), and the frame of the Spaitial viewer. `splat.ply` and `splat.sog` are usually Y-up already, but files converted long ago keep the SPZ frame; if a file's bounds match `scene_bounds` only after negating Y and Z, treat it like `splat.spz`.
+- Pixels start at the top-left corner of the image; pixel centres sit at +0.5. `world_xz_from_pixel` and `pixel_from_world_xz` are row-major 3×3 affines: `[x, z, 1] = world_xz_from_pixel · [px, py, 1]`.
+- `cut_height_y` is the world Y of the roof cut (splats above it are not drawn), `null` if unknown. `scene_bounds` is the world bounding box.
+- `image` is the downloadable PNG, cleaned up by an image model; small details can move a few pixels. `raw_image` is the render before cleanup, pixel-exact to the mapping, downloaded with `GET …/exports/floorplan?download=1&variant=raw`. It is `null` when the world kept no raw render (that download then answers `409 RESOURCE_NOT_READY`). Any other `variant` returns `400 INVALID_INPUT`.
+- Inside a zip, `floorplan.json` names the files (`"file": "floorplan.png"`, `"file": "floorplan.raw.png"`) instead of linking them, and describes the images in that zip.
+
+Place a splat point (raw SPZ `x, y, z`) on the floorplan:
+
+```js
+const [[a, b, tx], [c, d, tz]] = floorplan.raw_image.pixel_from_world_xz;
+const worldX = x;
+const worldZ = -z;
+const px = a * worldX + b * worldZ + tx;
+const py = c * worldX + d * worldZ + tz;
+```
 
 A `zip` export is addressed by its asset set. Build a subset with a POST body, then poll the same set with `?include=` (comma-separated); omit `include` on both for the default all-assets zip:
 
@@ -479,7 +547,71 @@ curl -s "https://api.spaitial.ai/v1/worlds/requests/$REQ_ID/exports/zip?include=
 
 A zip is addressed by its effective include set (deduplicated and sorted), so repeating a request for the same set returns `200 READY` with the cached archive, while a new set starts a new build (`202`). Missing assets (e.g. an unrequested mesh) are generated first, so a fresh full zip can take several minutes. Responses echo the effective `include`, and a READY zip's `download_url` carries it. Unknown asset names return `400 INVALID_INPUT`.
 
-The archive uses fixed entry names — `splat.spz`, `splat.sog`, `splat.ply`, `mesh.ply`, `floorplan.png` — plus a `manifest.json`. When the original request set a webhook URL, completion also delivers a `world.export.completed` event with `export.type: "zip"`, the `include` set, and the `download_url`.
+The archive uses fixed entry names plus a `manifest.json`:
+
+| Asset              | Entries                                                                 |
+| ------------------ | ----------------------------------------------------------------------- |
+| `spz`, `sog`, `ply` | `splat.spz`, `splat.sog`, `splat.ply`                                  |
+| `mesh`             | `mesh.ply`                                                              |
+| `floorplan`        | `floorplan.png`, `floorplan.json`, and `floorplan.raw.png` when kept    |
+| `cameras`          | `cameras.json` (Echo 3 capture worlds only)                             |
+| `glb`, `glb-uncompressed` | `textured_mesh.glb`, `textured_mesh_uncompressed.glb` (textured mesh worlds only) |
+
+Asking for an asset the world doesn't have returns `409 UNSUPPORTED_FOR_OUTPUT_TYPE`. When the original request set a webhook URL, completion also delivers a `world.export.completed` event with `export.type: "zip"`, the `include` set, the `download_url`, and the `floorplan` mapping when the zip includes it.
+
+## Capture worlds (Echo 3)
+
+Echo 3 (`model: "echo-3"`) reconstructs a real space from a phone scan, sent as a `capture_bundle` ZIP of JPEG frames with per-frame intrinsics. Camera poses (`cameras/camera_trajectory.json`, OpenCV `camera_from_world`) are optional but recommended. The ZIP layout, image rules and validation codes are in the [capture guide](https://docs.spaitial.ai/api/capture-worlds).
+
+### Frame limit
+
+Each account has a maximum number of frames per capture: 5,000 unless your account has a different limit. It can change, so read it before building a ZIP:
+
+```bash
+curl -s "https://api.spaitial.ai/v1/captures/limits" -H "Authorization: Bearer $API_KEY"
+# → { "min_frames": 1, "max_frames": 5000, "can_edit_max_frames": false, "max_frames_ceiling": 5000 }
+```
+
+`GET /v1/captures/process-quote?frame_count=<n>&model=echo-3` returns the price (`required_credits`, `available_credits`, `has_enough`) and answers `400 CAPTURE_FRAME_LIMIT_EXCEEDED` (limit in `error.details.max_frames`) above the limit. A ZIP with more images than `max_frames` fails validation with `TOO_MANY_FRAMES` and isn't charged.
+
+### Reconstructed cameras
+
+A finished capture world's `cameras_url` points at `GET /v1/worlds/requests/:id/cameras`, which redirects (302) to `cameras.json`. It is also the `cameras` zip asset. Worlds that aren't captures, and captures finished before cameras were recorded, have `cameras_url: null`; the endpoint then answers `404 CAMERAS_NOT_AVAILABLE`.
+
+```json
+{
+  "schema_version": "spaitial.capture_cameras.v1",
+  "capture_id": "cap_2c29b37b806c440bbbde4dd09ac07c40",
+  "splat": "splat.spz",
+  "coordinate_system": "opencv",
+  "width_px": 1920,
+  "height_px": 1440,
+  "source_frame_count": 605,
+  "frames": [
+    {
+      "source_index": 0,
+      "image": "Image_000001.jpg",
+      "camera_from_splat": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+      "fx_px": 1403.2,
+      "fy_px": 1403.0,
+      "cx_px": 960.4,
+      "cy_px": 719.8
+    }
+  ],
+  "input_alignment": {
+    "input_world_from_splat": [[0.9945, 0.0, 0.1221, 0.41], [0.0, 1.002, 0.0, -1.32], [-0.1221, 0.0, 0.9945, 0.07], [0, 0, 0, 1]],
+    "scale": 1.002,
+    "rmse_m": 0.018,
+    "rotation_rmse_deg": 0.4,
+    "inlier_frames": 241,
+    "aligned_frames": 244
+  }
+}
+```
+
+- `frames` is the subset of your frames Echo 3 used, so it is usually shorter than `source_frame_count`. `source_index` 0 is `Image_000001.jpg`; intrinsics are in pixels of your JPEG.
+- `camera_from_splat` is row-major 4×4 and maps raw `splat.spz` coordinates (OpenCV: +X right, +Y down, +Z forward) to camera coordinates. For a Y-up viewer, or the floorplan's world frame, use `camera_from_world = camera_from_splat @ diag(1, -1, -1, 1)`.
+- `input_alignment` is only present when you uploaded poses and at least half the frames agree with them. `input_world_from_splat` is a similarity transform (upper 3×3 = `scale` × rotation) from splat coordinates into your trajectory's world; `rmse_m` is the fit's camera position error in your units, and `inlier_frames` counts the frames the fit used.
 
 ## Idempotency
 
@@ -649,7 +781,10 @@ Stable codes:
 | `PANORAMA_NOT_FOUND`                               | 404  | Unknown `panorama_id` or not owned by caller                                                   |
 | `PANORAMA_EXPIRED`                                 | 410  | Edited panorama is past its 24-hour TTL                                                        |
 | `EDIT_FAILED`                                      | 503  | Panorama edit could not be completed; retry                                                    |
-| `RESOURCE_NOT_READY`                               | 409  | World not yet `COMPLETED` for artifact/export operations                                       |
+| `CAMERAS_NOT_AVAILABLE`                            | 404  | `/cameras` on a world without reconstructed cameras                                            |
+| `CAPTURE_FRAME_LIMIT_EXCEEDED`                     | 400  | Capture quote above your account's frame limit; `details.max_frames` has the limit             |
+| `RESOURCE_NOT_READY`                               | 409  | World not yet `COMPLETED` for artifact/export operations, or the export isn't ready to download |
+| `UNSUPPORTED_FOR_OUTPUT_TYPE`                      | 409  | The world has no such file, e.g. `mesh` on a textured mesh world or `cameras` on a non-capture |
 | `IDEMPOTENCY_KEY_REUSED`                           | 409  | Same key used with different body                                                              |
 | `REQUEST_NOT_CANCELLABLE`                          | 409  | Cancel on a COMPLETED / FAILED request                                                         |
 | `RATE_LIMIT_EXCEEDED`                              | 429  | Back off; check `Retry-After` + `X-RateLimit-*`                                                |
@@ -721,7 +856,7 @@ curl https://api.spaitial.ai/v1/models -H "Authorization: Bearer $API_KEY"
 | `is_default`                 | Always `false` for API keys; there is no default model on the API, so always pass an explicit `id`                                                |
 | `is_internal`                | `true` for staff-only models; those are hidden from non-staff accounts, so external callers only see `false`                                      |
 
-`pricing` is the authoritative price. Echo 3 (`echo-3`, capture input) is enabled for every API key and costs `900 + frame_count` credits; its `credit_cost` is the 900-credit base. Get the exact figure for a capture from `GET /v1/captures/process-quote?frame_count=<n>&model=echo-3` (`required_credits`, `available_credits`, `has_enough`). Captures are sent as a `capture_bundle` ZIP, see the [capture guide](https://docs.spaitial.ai/api/capture-worlds). Worlds created from a panorama (`panorama_id`, or a panorama image) skip image-to-pano and cost `credit_cost − 45` (115 for Echo 2).
+`pricing` is the authoritative price. Echo 3 (`echo-3`, capture input) API access comes with the Standard and Pro plans (`MODEL_FORBIDDEN` otherwise) and costs `900 + frame_count` credits; its `credit_cost` is the 900-credit base. Get the exact figure for a capture from `GET /v1/captures/process-quote?frame_count=<n>&model=echo-3` (`required_credits`, `available_credits`, `has_enough`). `max_frames` in `pricing` is the default; your account's limit comes from `GET /v1/captures/limits`. Captures are sent as a `capture_bundle` ZIP, poses optional; see [Capture worlds](#capture-worlds-echo-3) and the [capture guide](https://docs.spaitial.ai/api/capture-worlds). Worlds created from a panorama (`panorama_id`, or a panorama image) skip image-to-pano and cost `credit_cost − 45` (115 for Echo 2).
 
 Pass `model: "<id>"` on `POST /v1/worlds` (required; a missing or `"default"` model returns `400 INVALID_INPUT`). Ids are stable lowercase slugs; `name` is a display label that may change. Unknown ids return `MODEL_NOT_FOUND`; models not enabled for the key return `MODEL_FORBIDDEN`.
 
@@ -734,7 +869,7 @@ Pass `model: "<id>"` on `POST /v1/worlds` (required; a missing or `"default"` mo
 - `validation` is advisory by default. Issues are surfaced as warnings on the world unless you opt into `error_on_fail: true`.
 - Submitting the same body with a new `Idempotency-Key` makes a fresh job. Reuse the same key only for genuine network retries.
 - Splats and panoramas are served from a private bucket. Always go through `/v1/worlds/requests/:id/splat` or `/panorama`.
-- SPZ orientation: splat positions are in the RDF / OpenCV frame (x-right, **y-down**, z-forward), packed as `UNSPECIFIED` — the raw values are RDF, not the right-up-back (RUB, y-up) frame many other SPZ exporters use. RDF and RUB differ by a 180° rotation about X. Viewers that assume RUB (or read SPZ via `@playcanvas/splat-transform`) may render the scene upside-down; apply a 180°-about-X rotation (or flip the up-axis) if so.
+- SPZ orientation: splat positions are in the RDF / OpenCV frame (x-right, **y-down**, z-forward), packed as `UNSPECIFIED` — the raw values are RDF, not the right-up-back (RUB, y-up) frame many other SPZ exporters use. RDF and RUB differ by a 180° rotation about X. Viewers that assume RUB (or read SPZ via `@playcanvas/splat-transform`) may render the scene upside-down; apply a 180°-about-X rotation (or flip the up-axis) if so. That rotation, `(x, y, z) → (x, -y, -z)`, gives the Y-up world frame the [floorplan mapping](#floorplan-coordinates) uses; reconstructed cameras convert with `camera_from_splat @ diag(1, -1, -1, 1)`.
 - Export `download_url` values are backend proxy URLs returned by `GET /v1/worlds/requests/:id/exports/:type`; calling one redirects to a short-lived signed file URL.
 
 ## Reference
