@@ -1,6 +1,6 @@
 ---
 name: spaitial-api
-description: Generate and edit explorable 3D worlds, game scenes, Gaussian splats, SPZ/SOG assets, and spatial world-model outputs via the Spaitial v1 HTTP API. Use when integrating with `api.spaitial.ai`, the SpAItial developer API, or when the user mentions world models, spatial AI, 3D worlds, game scenes, agent environments, Gaussian splatting, API keys (`spt_live_…` / `spt_test_…`), `/v1/worlds`, `/v1/panoramas/edit`, splat (`.spz`) generation, panorama editing, Echo 3 phone captures, floorplans and mapping them to world coordinates, reconstructed camera poses, mesh and zip exports, world request IDs (`req_…`), panorama IDs (`pano_…`), file IDs (`file_…`), webhook delivery for world generation, or building an SDK / integration on top of Spaitial.
+description: Generate and edit explorable 3D worlds, game scenes, Gaussian splats, SPZ/SOG assets, and spatial world-model outputs via the Spaitial v1 HTTP API. Use when integrating with `api.spaitial.ai`, the SpAItial developer API, or when the user mentions world models, spatial AI, 3D worlds, game scenes, agent environments, Gaussian splatting, API keys (`spt_live_…` / `spt_test_…`), `/v1/worlds`, `/v1/panoramas/edit`, splat (`.spz`) generation, panorama editing, Echo 3 phone captures (including several scans of one space merged into one world), floorplans and mapping them to world coordinates, reconstructed camera poses, mesh and zip exports, world request IDs (`req_…`), panorama IDs (`pano_…`), file IDs (`file_…`), webhook delivery for world generation, or building an SDK / integration on top of Spaitial.
 license: MIT
 ---
 
@@ -423,6 +423,8 @@ PENDING → PROCESSING → COMPLETED
 
 `cameras_url` is set on Echo 3 capture worlds and points at `/cameras`, the reconstructed camera of every frame (see [Capture worlds](#capture-worlds-echo-3)). It is `null` for other worlds.
 
+A capture sent as `zips` adds top-level `scans` (one entry per ZIP) and, when a scan was left out or not checked, `warnings`. See [Several scans of one space](#several-scans-of-one-space). Both are absent for every other input.
+
 `output_type` is `splat` for every public model. Worlds from a private textured mesh model have `output_type: "textured_mesh"`, `splat_url: null`, and a `mesh` block (`{ "format": "glb", "url", "uncompressed_url" }`, both `/mesh?variant=meshopt|uncompressed`). Their only export is a zip of `glb` and `glb-uncompressed`; the splat-based exports answer `409 UNSUPPORTED_FOR_OUTPUT_TYPE`.
 
 ## Exports
@@ -563,6 +565,44 @@ Asking for an asset the world doesn't have returns `409 UNSUPPORTED_FOR_OUTPUT_T
 
 Echo 3 (`model: "echo-3"`) reconstructs a real space from a phone scan, sent as a `capture_bundle` ZIP of JPEG frames with per-frame intrinsics. Camera poses (`cameras/camera_trajectory.json`, OpenCV `camera_from_world`) are optional but recommended. The ZIP layout, image rules and validation codes are in the [capture guide](https://docs.spaitial.ai/api/capture-worlds).
 
+### Several scans of one space
+
+When a space took more than one scan, send each scan as its own ZIP in `zips` instead of `zip`. Echo 3 merges them into one world:
+
+```json
+{
+  "model": "echo-3",
+  "input": {
+    "type": "capture_bundle",
+    "zips": [
+      { "type": "url", "zip_url": "https://bucket.s3.amazonaws.com/ground-floor.zip?X-Amz-...", "label": "ground-floor" },
+      { "type": "url", "zip_url": "https://bucket.s3.amazonaws.com/upstairs.zip?X-Amz-...", "label": "upstairs" }
+    ]
+  }
+}
+```
+
+- Each ZIP is a complete capture (its own `Image_000001.jpg` onwards and camera files) and each URL follows the single-ZIP rules. `label` is optional and comes back on that scan's result entry.
+- 1 to 8 ZIPs; one entry behaves like `zip`. Send `zip` or `zips`, not both (`400 INVALID_INPUT`).
+- The account's frame limit and the 8 GiB uncompressed limit apply to all ZIPs together. Price is `900 + total frames`.
+- All ZIPs need the same image resolution and hold orientation, and poses in all or none (`SCANS_RESOLUTION_MISMATCH`, `SCANS_ORIENTATION_MISMATCH`, `SCANS_POSE_MISMATCH`; `SCANS_DUPLICATE` for two ZIPs with the same images). Per-ZIP validation issues start with `zips[i]:` and carry `details.zip_index`.
+- `zips[0]` is the reference. Echo 3 places every other scan against the reference or a scan it already placed, from matching views, so each scan must overlap one other scan. A scan that matches nothing is left out; the job still completes and the scan is still charged. Without camera poses, scans aren't checked.
+
+The job result and the `world.completed` webhook carry `scans`, one entry per ZIP in request order, from job creation on:
+
+```json
+"scans": [
+  { "index": 0, "label": "ground-floor", "reference": true, "status": "included", "frame_count": 2500 },
+  { "index": 1, "label": "upstairs", "reference": false, "status": "skipped", "frame_count": 1145,
+    "reason": { "code": "NO_VISUAL_OVERLAP", "message": "No view in this scan matched the reference scan or a scan merged with it. ..." } }
+],
+"warnings": [
+  { "code": "CAPTURE_SCANS_SKIPPED", "message": "1 of 2 scans were left out of the world; see scans for why.", "details": { "scan_indexes": [1] } }
+]
+```
+
+`status` is `pending` until the reconstruction reports, then `included` or `skipped`; `unknown` means the job finished without checking the scan (for example scans without poses). `frame_count` is `null` until the ZIPs are read. `reason.code` is `NO_VISUAL_OVERLAP`, `INSUFFICIENT_VISUAL_OVERLAP` or `NO_READABLE_FRAMES`. `warnings` appears on a completed job with skipped (`CAPTURE_SCANS_SKIPPED`) or unchecked (`CAPTURE_SCANS_UNCHECKED`) scans. Treat `status` and `reason.code` as open sets; handle unknown values as `unknown`.
+
 ### Frame limit
 
 Each account has a maximum number of frames per capture: 5,000 unless your account has a different limit. It can change, so read it before building a ZIP:
@@ -611,6 +651,7 @@ A finished capture world's `cameras_url` points at `GET /v1/worlds/requests/:id/
 
 - `frames` is the subset of your frames Echo 3 used, so it is usually shorter than `source_frame_count`. `source_index` 0 is `Image_000001.jpg`; intrinsics are in pixels of your JPEG.
 - `camera_from_splat` is row-major 4×4 and maps raw `splat.spz` coordinates (OpenCV: +X right, +Y down, +Z forward) to camera coordinates. For a Y-up viewer, or the floorplan's world frame, use `camera_from_world = camera_from_splat @ diag(1, -1, -1, 1)`.
+- For a multi-scan world (`zips`), frames are numbered across all ZIPs in request order: `zips[1]`'s first frame follows `zips[0]`'s last, and `image` uses that merged numbering. `input_alignment` is left out, because each scan's poses are in its own tracking session's world.
 - `input_alignment` is only present when you uploaded poses and at least half the frames agree with them. `input_world_from_splat` is a similarity transform (upper 3×3 = `scale` × rotation) from splat coordinates into your trajectory's world; `rmse_m` is the fit's camera position error in your units, and `inlier_frames` counts the frames the fit used.
 
 ## Idempotency
@@ -666,7 +707,7 @@ Verify with the `webhook_secret` from your API key's settings page.
 }
 ```
 
-For `world.failed`: `data` is `null` + top-level `error: { code, message }`. For `world.cancelled`: `data` is `null`, no `error`.
+For `world.failed`: `data` is `null` + top-level `error: { code, message }`. For `world.cancelled`: `data` is `null`, no `error`. For a capture sent as `zips`, `world.completed` also carries top-level `scans` and, when a scan was left out or not checked, `warnings` (same as the result envelope); other events don't.
 
 Export webhooks use the same envelope with `data: null` and an `export` block:
 
@@ -856,7 +897,7 @@ curl https://api.spaitial.ai/v1/models -H "Authorization: Bearer $API_KEY"
 | `is_default`                 | Always `false` for API keys; there is no default model on the API, so always pass an explicit `id`                                                |
 | `is_internal`                | `true` for staff-only models; those are hidden from non-staff accounts, so external callers only see `false`                                      |
 
-`pricing` is the authoritative price. Echo 3 (`echo-3`, capture input) API access comes with the Standard and Pro plans (`MODEL_FORBIDDEN` otherwise) and costs `900 + frame_count` credits; its `credit_cost` is the 900-credit base. Get the exact figure for a capture from `GET /v1/captures/process-quote?frame_count=<n>&model=echo-3` (`required_credits`, `available_credits`, `has_enough`). `max_frames` in `pricing` is the default; your account's limit comes from `GET /v1/captures/limits`. Captures are sent as a `capture_bundle` ZIP, poses optional; see [Capture worlds](#capture-worlds-echo-3) and the [capture guide](https://docs.spaitial.ai/api/capture-worlds). Worlds created from a panorama (`panorama_id`, or a panorama image) skip image-to-pano and cost `credit_cost − 45` (115 for Echo 2).
+`pricing` is the authoritative price. Echo 3 (`echo-3`, capture input) API access comes with the Standard and Pro plans (`MODEL_FORBIDDEN` otherwise) and costs `900 + frame_count` credits; its `credit_cost` is the 900-credit base. Get the exact figure for a capture from `GET /v1/captures/process-quote?frame_count=<n>&model=echo-3` (`required_credits`, `available_credits`, `has_enough`). `max_frames` in `pricing` is the default; your account's limit comes from `GET /v1/captures/limits`. Captures are sent as a `capture_bundle` ZIP, or several ZIPs of one space as `zips` (the frame limit and price count all frames), poses optional; see [Capture worlds](#capture-worlds-echo-3) and the [capture guide](https://docs.spaitial.ai/api/capture-worlds). Worlds created from a panorama (`panorama_id`, or a panorama image) skip image-to-pano and cost `credit_cost − 45` (115 for Echo 2).
 
 Pass `model: "<id>"` on `POST /v1/worlds` (required; a missing or `"default"` model returns `400 INVALID_INPUT`). Ids are stable lowercase slugs; `name` is a display label that may change. Unknown ids return `MODEL_NOT_FOUND`; models not enabled for the key return `MODEL_FORBIDDEN`.
 
