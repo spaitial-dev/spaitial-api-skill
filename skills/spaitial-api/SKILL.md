@@ -584,7 +584,7 @@ When a space took more than one scan, send each scan as its own ZIP in `zips` in
 
 - Each ZIP is a complete capture (its own `Image_000001.jpg` onwards and camera files) and each URL follows the single-ZIP rules. `label` is optional and comes back on that scan's result entry.
 - 1 to 8 ZIPs; one entry behaves like `zip`. Send `zip` or `zips`, not both (`400 INVALID_INPUT`).
-- The account's frame limit and the 8 GiB uncompressed limit apply to all ZIPs together. Price is `900 + total frames`.
+- The account's frame limit and the 8 GiB uncompressed limit apply to all ZIPs together, not to each ZIP. The frame limit will rise as Echo 3 handles larger spaces, so read it from `GET /v1/captures/limits` rather than hard-coding 5,000. Price is `900 + total frames`.
 - All ZIPs need the same image resolution and hold orientation, and poses in all or none (`SCANS_RESOLUTION_MISMATCH`, `SCANS_ORIENTATION_MISMATCH`, `SCANS_POSE_MISMATCH`; `SCANS_DUPLICATE` for two ZIPs with the same images). Per-ZIP validation issues start with `zips[i]:` and carry `details.zip_index`.
 - `zips[0]` is the reference. Echo 3 places every other scan against the reference or a scan it already placed, from matching views, so each scan must overlap one other scan. A scan that matches nothing is left out; the job still completes and the scan is still charged. Without camera poses, scans aren't checked.
 
